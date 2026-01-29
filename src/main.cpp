@@ -1,0 +1,458 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <iomanip>
+#include <unordered_set>
+#include <unordered_map>
+#include <algorithm>
+#include <stdexcept>
+#include <random>
+#include <chrono>
+#include "helpers.h"
+#include "debug.h"
+#include "structs.h"
+
+
+// Compute min distance from a fixed genotype (leaf) to all possible genotypes allowed on a branch
+int evoDistance(
+    const std::vector<uint8_t>& leafGenotype,
+    const std::vector<uint8_t>& alleles
+) {
+    int dist = 0;
+
+    for(size_t i = 0; i < leafGenotype.size(); i++) {
+        uint8_t leaf = leafGenotype[i];
+        uint8_t branch = alleles[i];
+        
+        // Branchless: dist += (leaf != 0) && (leaf != low_nibble) && (leaf != high_nibble)
+        uint8_t first = branch & 0x0F;
+        uint8_t second = branch >> 4;
+        
+        dist += (leaf != 0) & (leaf != first) & (leaf != second);
+    }
+
+    return dist;
+}
+
+// Split branch, and return the new node in the middle
+InitNode* splitBranch(
+    InitBranch* branch,
+    const std::vector<bool>& isLeft,
+    std::vector<InitBranch*>& allBranches
+) {
+
+    // Rewiring, first
+    InitNode* node = new InitNode;
+    InitBranch* rightBranch = new InitBranch;
+
+    // Wire rightBranch
+    rightBranch->child = node;
+    rightBranch->parent = branch->parent;
+    rightBranch->alleles = branch->alleles; // Initialize to same as branch; will adjust
+    rightBranch->nMuts = branch->nMuts;
+
+    // Update childbranches of parent of branch
+    std::erase(rightBranch->parent->childBranches, branch);
+    rightBranch->parent->childBranches.push_back(rightBranch);
+
+    // Update allBranches
+    allBranches.push_back(rightBranch);
+
+    // Rewire branch
+    branch->parent = node;
+
+    // Wire node
+    node->parentBranch = rightBranch;
+    node->childBranches = {branch};
+    node->name = ""; // internal node
+
+    for(size_t pos = 0; pos < branch->alleles.size(); pos++) {
+        // If no mutation, nothing to do here!
+        if(!isMutation(branch->alleles[pos])) {
+            continue;
+        }
+
+        if(isLeft[pos]) {
+
+          
+            // If the mutation is supposed to happen on the left branch, modify the right branch
+            rightBranch->alleles[pos] = getParent(branch->alleles[pos]);
+            rightBranch->nMuts--;
+        }else{
+
+            // Vice versa
+            branch->alleles[pos] = getChild(branch->alleles[pos]);
+            branch->nMuts--;
+        }
+    }
+
+    return node;
+
+}
+
+void attach(
+    InitNode* node,
+    const std::vector<uint8_t>& leafGenotype,
+    InitBranch* branch,
+    std::vector<InitBranch*>& allBranches
+) {
+
+    size_t L = leafGenotype.size();
+
+
+    // On the existing branch, sort the mutations (2-letter words) into two categories:
+    // "Left": the mutation is on the branch's child, not leafGenotype
+    // "Right": the mutation is on both the branch's child and leafGenotype
+    std::vector<bool> isLeft(L, false);
+    int nLeft = 0;
+    int nMutsOnBranch = 0; // Number of mutations on "branch"
+    int nMutsOnNewBranch = 0; // Number of mutations on "newBranch"
+
+    // Then, also record which mutations must occur to get to leafGenotype
+    std::vector<uint8_t> newBranchAlleles(L);
+
+    for(size_t pos = 0; pos < L; pos++) {
+        
+        if(isMutation(branch->alleles[pos])) {
+            nMutsOnBranch++;
+        }
+
+        // Casework as per above comments
+        // If leaf genotype is N or -, going to default to child genotype in case of mutation
+        // Hence the mutation must occur on the right
+        // (Can see if other way is better...)
+        if(isMissing(leafGenotype[pos])) {
+
+            if(isMutation(branch->alleles[pos])) {
+                newBranchAlleles[pos] = getChild(branch->alleles[pos]);
+            }else{
+                newBranchAlleles[pos] = branch->alleles[pos];
+            }
+            
+            continue;
+        }
+
+        // First, check if attachment branch has mutation or no
+        if(!isMutation(branch->alleles[pos])) {
+
+          
+            // Mutation?
+            if(leafGenotype[pos] != branch->alleles[pos]) {
+                newBranchAlleles[pos] = makeMutation(leafGenotype[pos], branch->alleles[pos]);
+                nMutsOnNewBranch++;
+            }else {
+                // No mutation needed - leaf matches branch
+                newBranchAlleles[pos] = leafGenotype[pos];
+            }
+        }else{
+
+
+            if(matchesChild(leafGenotype[pos], branch->alleles[pos])) {
+
+                // Do nothing; already child allele and mutation is on the right
+                newBranchAlleles[pos] = leafGenotype[pos];
+                
+
+            }else if(matchesParent(leafGenotype[pos], branch->alleles[pos])) {
+                // Note that we must attach to the right of the mutation; hence, the mutation is on the left
+                isLeft[pos] = true;
+                nLeft++;
+                newBranchAlleles[pos] = leafGenotype[pos];
+
+            }else{
+                // Very rare triallelic case: attach to left of mutation by default; hence mutation is on the right
+              
+                newBranchAlleles[pos] = makeMutation(leafGenotype[pos], getChild(branch->alleles[pos]));
+                nMutsOnNewBranch++;
+
+            }
+        }
+    }
+
+    if(nMutsOnBranch != branch->nMuts) {
+        throw std::runtime_error("Mutation count mismatch");
+    }
+
+    // Create new connecting branch
+    InitBranch* newBranch = new InitBranch;
+    newBranch->child = node;
+    newBranch->alleles = newBranchAlleles;
+    newBranch->nMuts = nMutsOnNewBranch;
+
+    // Update allBranches
+    allBranches.push_back(newBranch);
+
+    // Wire node to newBranch
+    node->parentBranch = newBranch;
+
+    // If the following hold:
+    // (1) all attachment points are left
+    // (2) left node isn't a leaf
+    // then attach directly to left node
+    if((nLeft == 0) && (branch->child->name == "")) {
+        newBranch->parent = branch->child; // Left endpoint of existing branch
+        newBranch->parent->childBranches.push_back(newBranch);
+        return;
+    }
+
+    // Same for right
+    if(nLeft == nMutsOnBranch) {
+        if(branch->parent->name != "") {
+            std::cout << branch->parent->name << std::endl;
+            throw std::runtime_error("Node with children shouldn't be named");
+        }
+
+        newBranch->parent = branch->parent;
+        newBranch->parent->childBranches.push_back(newBranch);
+        return;
+    }
+
+    InitNode* newNode = splitBranch(branch, isLeft, allBranches);
+
+    // Wire up newBranch
+    newBranch->parent = newNode;
+    newBranch->parent->childBranches.push_back(newBranch);
+
+}
+
+
+
+
+void deleteInitTree(InitNode* node) {
+    for(InitBranch* b : node->childBranches) {
+        deleteInitTree(b->child);
+        delete b;
+    }
+    delete node;
+}
+
+void processByLine(
+    const std::string& fasta_filepath,
+    const std::string& ref_filepath,
+    int start_pos, // Inclusive; 0-indexed
+    int end_pos // Exclusive; 0-indexed
+) {
+
+    // Genome length
+    size_t L = end_pos - start_pos;
+
+
+    std::string line;
+    std::string refName;
+    std::vector<uint8_t> ref;
+
+
+    // Ensure we can open file
+    std::ifstream ref_fasta_file(ref_filepath);
+    if (!ref_fasta_file.is_open()) {
+        std::cerr << "Failed to open ref_fasta_file\n";
+        return;
+    }
+
+    std::vector<uint8_t> refGenotype;
+
+    while (std::getline(ref_fasta_file, line)) {
+
+        if(line.empty()) continue;
+
+        if(line[0] == '>') {
+            refName = line.substr(1, line.size() - 1);
+            continue;
+        }
+
+        if(start_pos < 0 || start_pos > line.size()) {
+            throw std::runtime_error("Start pos out of bounds");
+        }
+
+        if(end_pos <= start_pos) {
+            throw std::runtime_error("End pos <= start_pos");
+        }
+
+        if(end_pos > line.size()) {
+            throw std::runtime_error("end pos too big");
+        }
+
+        std::string letters = line.substr(start_pos, L);
+        // Check ref has all valid tokens
+        checkAlphabet(letters, {'A', 'C', 'G', 'T'});
+        refGenotype = encodeString(letters);
+    }
+
+    ref_fasta_file.close();
+
+    
+    // Ensure we can open file
+    std::ifstream fasta_file(fasta_filepath);
+    if (!fasta_file.is_open()) {
+        std::cerr << "Failed to open fasta_file\n";
+        return;
+    }
+
+    if(refName == "") {
+        throw std::runtime_error("Invalid refName");
+    }
+
+    
+
+    // Make a node for the reference
+    InitNode* rootNode = new InitNode;
+    rootNode->name = ""; // Intentionally giving the root no name, as it has a child
+    rootNode->parentBranch = nullptr;
+    rootNode->childBranches = {};
+
+
+    
+
+    // Valid tokens
+    std::unordered_set<char> alphabet = {'A', 'C', 'G', 'T', 'N', '-'};
+
+    // Maintain vector of all branches
+    std::vector<InitBranch*> allBranches;
+
+    line = "";
+    std::string name;
+
+    long long total_search_time = 0;
+    long long total_attach_time = 0;
+    int num_sequences = 0;
+
+
+    while (std::getline(fasta_file, line)) {
+
+        if(line.empty()) continue;
+
+        if(line[0] == '>') {
+            name = line.substr(1, line.size() - 1);
+            continue;
+        }
+
+        // Get genome (of relevant segment)
+        std::string letters = line.substr(start_pos, L);
+
+        // Check ACGTN-
+        checkAlphabet(letters, alphabet);
+
+        // Convert to 8 bit
+        std::vector<uint8_t> leafGenotype = encodeString(letters);
+
+        
+
+        InitNode* node = new InitNode;
+        if(name == "") {
+            throw std::runtime_error("Invalid sequence name");
+        }
+        node->name = name;
+        node->childBranches = {};
+        node->seq = letters;
+
+
+        // Time flows backwards from the present, with A1C meaning the C allele is ancestral, A is newer
+
+        // SPECIAL CASE: If no branches, create the first one
+        if(allBranches.size() == 0) {
+            // First node processed
+            InitBranch* branch = new InitBranch;
+            branch->parent = rootNode;
+            branch->child = node;
+            branch->alleles = std::vector<uint8_t>(L, 0);
+            branch->nMuts = 0;
+
+            for(size_t pos = 0; pos < L; pos++) {
+
+                if(isMissing(leafGenotype[pos])) {
+                    branch->alleles[pos] = refGenotype[pos];
+                    continue;
+                }
+
+                if(leafGenotype[pos] != refGenotype[pos]) {
+                    branch->alleles[pos] = makeMutation(leafGenotype[pos], refGenotype[pos]);
+                    branch->nMuts++;
+                }else{
+                    branch->alleles[pos] = leafGenotype[pos];
+                }
+            }
+
+            // Wire to nodes
+            node->parentBranch = branch;
+            rootNode->childBranches.push_back(branch);
+
+            // update allbranches
+            allBranches.push_back(branch);
+
+            // Move on
+            continue;
+
+        }
+
+        // O(N^2) step: check all other branches for best attachment point
+        // Time the search
+        auto search_start = std::chrono::high_resolution_clock::now();
+
+        int bestDist = std::numeric_limits<int>::max();
+        InitBranch* bestBranch = nullptr;
+
+        for(InitBranch* b : allBranches) {
+            int dist = evoDistance(leafGenotype, b->alleles);
+            if(dist < bestDist) {
+                bestDist = dist;
+                bestBranch = b;
+            }
+
+            if(dist == 0) {
+                break;
+            }
+        }
+
+        auto search_end = std::chrono::high_resolution_clock::now();
+        total_search_time += std::chrono::duration_cast<std::chrono::microseconds>(
+            search_end - search_start).count();
+
+        // Attach at that branch
+        auto attach_start = std::chrono::high_resolution_clock::now();
+        attach(node, leafGenotype, bestBranch, allBranches);
+        auto attach_end = std::chrono::high_resolution_clock::now();
+        total_attach_time += std::chrono::duration_cast<std::chrono::microseconds>(
+            attach_end - attach_start).count();
+
+    }
+    
+    fasta_file.close();
+
+    std::cout << "\n=== Performance Stats ===\n";
+    std::cout << "Total search time: " << total_search_time / 1000.0 << " ms\n";
+    std::cout << "Total attach time: " << total_attach_time / 1000.0 << " ms\n";
+    
+
+    int totMutations = 0;
+    for(InitBranch* b : allBranches) {
+        totMutations += b->nMuts;
+    }
+
+    std::cout << "Total Mutations: " << totMutations << std::endl;
+
+    checkTree(refGenotype, rootNode);
+
+
+    // Cleanup
+    deleteInitTree(rootNode);
+}
+
+int main(int argc, char* argv[]) {
+    if(argc != 5) {
+        std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <start_pos> <end_pos>\n";
+        return 1;
+    }
+
+    std::string fasta_filepath = argv[1];
+    std::string ref_filepath = argv[2];
+    int start_pos = std::stoi(argv[3]);
+    int end_pos = std::stoi(argv[4]);
+
+    processByLine(fasta_filepath, ref_filepath, start_pos, end_pos);
+
+    std::cout << "Done!" << std::endl;
+
+    return 0;
+}
