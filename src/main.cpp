@@ -375,9 +375,10 @@ void processByLine(
 
         std::cout << " (seq " << sequenceCount << ")" << std::endl;  // ADD THIS
 
-        // Check if we've hit max branches
-        if(allBranches.size() >= (size_t)maxBranches) {
+        // CHECK LIMIT with safety margin (each sequence can create up to 2 branches)
+        if(allBranches.size() + 2 >= (size_t)maxBranches) {
             std::cout << "Reached maximum number of branches (" << maxBranches << "). Stopping early.\n";
+            std::cout << "Current branches: " << allBranches.size() << ", sequences processed: " << sequenceCount << "\n";
             break;
         }
 
