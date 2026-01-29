@@ -365,6 +365,7 @@ void processByLine(
     
     size_t sequenceCount = 0;
 
+    std::cout << "Entering fasta processing step..." << std::endl;
     while (std::getline(fasta_file, line)) {
         if(line.empty()) continue;
 
