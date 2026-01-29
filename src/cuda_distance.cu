@@ -3,19 +3,12 @@
 #include <vector>
 #include <stdexcept>
 #include <string>
-
-// Forward declaration for InitBranch (we only need the structure layout)
-struct InitBranch {
-    void* parent;
-    void* child;
-    // We'll access alleles directly via pointer
-    int nMuts;
-};
+#include <iostream>
 
 // CUDA kernel for parallel distance computation
 __global__ void evoDistanceKernel(
     const uint8_t* leafGenotype,
-    uint8_t** branchAlleles,     // Array of pointers to branch alleles
+    uint8_t** branchAlleles,
     int* distances,
     size_t numBranches,
     size_t L
@@ -27,7 +20,6 @@ __global__ void evoDistanceKernel(
     const uint8_t* alleles = branchAlleles[idx];
     int dist = 0;
     
-    #pragma unroll 4
     for(size_t i = 0; i < L; i++) {
         uint8_t leaf = leafGenotype[i];
         uint8_t branch = alleles[i];
@@ -35,14 +27,12 @@ __global__ void evoDistanceKernel(
         uint8_t first = branch & 0x0F;
         uint8_t second = branch >> 4;
         
-        // Branchless distance calculation
         dist += (leaf != 0) & (leaf != first) & (leaf != second);
     }
     
     distances[idx] = dist;
 }
 
-// Host function to launch kernel (extern "C" for C++ linkage)
 extern "C" void computeDistancesGPU(
     const uint8_t* d_leafGenotype,
     uint8_t** d_branchAlleles,
@@ -52,9 +42,13 @@ extern "C" void computeDistancesGPU(
 ) {
     if(numBranches == 0) return;
     
+    std::cout << "GPU: numBranches=" << numBranches << ", L=" << L << std::endl;
+    
     // Launch kernel
     int threadsPerBlock = 256;
     int blocksPerGrid = (numBranches + threadsPerBlock - 1) / threadsPerBlock;
+    
+    std::cout << "GPU: blocks=" << blocksPerGrid << ", threads=" << threadsPerBlock << std::endl;
     
     evoDistanceKernel<<<blocksPerGrid, threadsPerBlock>>>(
         d_leafGenotype,
@@ -64,9 +58,19 @@ extern "C" void computeDistancesGPU(
         L
     );
     
-    // Wait for kernel to complete
-    cudaError_t err = cudaDeviceSynchronize();
-    if(err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err));
+    // Check for kernel launch errors
+    cudaError_t launchErr = cudaGetLastError();
+    if(launchErr != cudaSuccess) {
+        std::cerr << "Kernel launch error: " << cudaGetErrorString(launchErr) << std::endl;
+        throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(launchErr));
     }
+    
+    // Wait for kernel to complete
+    cudaError_t syncErr = cudaDeviceSynchronize();
+    if(syncErr != cudaSuccess) {
+        std::cerr << "Kernel sync error: " << cudaGetErrorString(syncErr) << std::endl;
+        throw std::runtime_error(std::string("CUDA kernel execution failed: ") + cudaGetErrorString(syncErr));
+    }
+    
+    std::cout << "GPU: kernel completed successfully" << std::endl;
 }

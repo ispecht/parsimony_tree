@@ -399,25 +399,55 @@ void processByLine(
 
         // GPU-ACCELERATED SEARCH
         auto search_start = std::chrono::high_resolution_clock::now();
-        
+
         size_t numBranches = allBranches.size();
-        
+
+        std::cout << "Processing sequence, numBranches=" << numBranches << std::endl;
+
+        // Check if we're exceeding maxBranches
+        if(numBranches >= (size_t)maxBranches) {
+            throw std::runtime_error("Exceeded maxBranches limit");
+        }
+
         // Allocate unified memory for leaf genotype
         uint8_t* d_leafGenotype;
-        cudaMallocManaged(&d_leafGenotype, L * sizeof(uint8_t));
+        cudaError_t err1 = cudaMallocManaged(&d_leafGenotype, L * sizeof(uint8_t));
+        if(err1 != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaMallocManaged failed for leafGenotype: ") + cudaGetErrorString(err1));
+        }
+
         for(size_t i = 0; i < L; i++) {
             d_leafGenotype[i] = leafGenotype[i];
         }
-        
+
         // Create array of pointers to branch alleles
         uint8_t** d_branchAlleles;
-        cudaMallocManaged(&d_branchAlleles, numBranches * sizeof(uint8_t*));
+        cudaError_t err2 = cudaMallocManaged(&d_branchAlleles, numBranches * sizeof(uint8_t*));
+        if(err2 != cudaSuccess) {
+            cudaFree(d_leafGenotype);
+            throw std::runtime_error(std::string("cudaMallocManaged failed for branchAlleles: ") + cudaGetErrorString(err2));
+        }
+
+        // Validate branch pointers
         for(size_t i = 0; i < numBranches; i++) {
+            if(allBranches[i] == nullptr) {
+                throw std::runtime_error("Null branch pointer at index " + std::to_string(i));
+            }
+            if(allBranches[i]->alleles.size() != L) {
+                throw std::runtime_error("Branch alleles size mismatch at index " + std::to_string(i));
+            }
             d_branchAlleles[i] = allBranches[i]->alleles.data();
         }
-        
+
+        std::cout << "About to call GPU kernel..." << std::endl;
+
         // Call GPU kernel
         computeDistancesGPU(d_leafGenotype, d_branchAlleles, d_distances, numBranches, L);
+
+        std::cout << "GPU kernel returned" << std::endl;
+
+        // Find minimum distance on CPU
+        // ... rest of your code ...
         
         // Find minimum distance on CPU
         int bestDist = std::numeric_limits<int>::max();
