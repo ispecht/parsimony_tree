@@ -19,10 +19,10 @@ struct InitBranch {
     int nMuts;
 };
 
-// Declare CUDA function (implemented in cuda_distance.cu)
+// Update the function signature
 extern "C" void computeDistancesGPU(
     const uint8_t* d_leafGenotype,
-    uint8_t** d_branchAlleles,
+    const uint8_t* d_branchAllelesFlat,  // CHANGED: no longer **
     int* d_distances,
     size_t numBranches,
     size_t L

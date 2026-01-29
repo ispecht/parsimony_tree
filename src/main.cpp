@@ -232,32 +232,26 @@ void deleteInitTree(InitNode* node) {
 void processByLine(
     const std::string& fasta_filepath,
     const std::string& ref_filepath,
-    int start_pos, // Inclusive; 0-indexed
-    int end_pos, // Exclusive; 0-indexed
+    int start_pos,
+    int end_pos,
     int maxBranches,
     bool useGPU
 ) {
-
     // Genome length
     size_t L = end_pos - start_pos;
 
-
     std::string line;
     std::string refName;
-    std::vector<uint8_t> ref;
+    std::vector<uint8_t> refGenotype;
 
-
-    // Ensure we can open file
+    // Read reference sequence
     std::ifstream ref_fasta_file(ref_filepath);
     if (!ref_fasta_file.is_open()) {
         std::cerr << "Failed to open ref_fasta_file\n";
         return;
     }
 
-    std::vector<uint8_t> refGenotype;
-
     while (std::getline(ref_fasta_file, line)) {
-
         if(line.empty()) continue;
 
         if(line[0] == '>') {
@@ -268,62 +262,71 @@ void processByLine(
         if(start_pos < 0 || (size_t)start_pos > line.size()) {
             throw std::runtime_error("Start pos out of bounds");
         }
-
         if((size_t)end_pos > line.size()) {
             throw std::runtime_error("end pos too big");
         }
-
         if(end_pos <= start_pos) {
             throw std::runtime_error("End pos <= start_pos");
         }
 
         std::string letters = line.substr(start_pos, L);
-        // Check ref has all valid tokens
-        std::cout << "Checking alphabet for ref" << std::endl;
         checkAlphabet(letters, {'A', 'C', 'G', 'T'});
         refGenotype = encodeString(letters);
     }
-
     ref_fasta_file.close();
 
-    // Only allocate GPU memory if using GPU
+    if(refName == "") {
+        throw std::runtime_error("Invalid refName");
+    }
+
+    // PERSISTENT GPU MEMORY - allocate once for entire run
+    uint8_t* d_branchAllelesFlat = nullptr;
+    uint8_t* d_leafGenotypesFlat = nullptr;
     int* d_distances = nullptr;
+    
     if(useGPU) {
+        // Allocate for branch alleles
+        cudaMallocManaged(&d_branchAllelesFlat, maxBranches * L * sizeof(uint8_t));
+        cudaError_t err1 = cudaGetLastError();
+        if(err1 != cudaSuccess) {
+            throw std::runtime_error(std::string("CUDA malloc failed for branches: ") + cudaGetErrorString(err1));
+        }
+        
+        // Allocate for leaf genotypes
+        cudaMallocManaged(&d_leafGenotypesFlat, maxBranches * L * sizeof(uint8_t));
+        cudaError_t err2 = cudaGetLastError();
+        if(err2 != cudaSuccess) {
+            cudaFree(d_branchAllelesFlat);
+            throw std::runtime_error(std::string("CUDA malloc failed for leaves: ") + cudaGetErrorString(err2));
+        }
+        
+        // Allocate for distances
         cudaMallocManaged(&d_distances, maxBranches * sizeof(int));
-        cudaError_t err = cudaGetLastError();
-        if(err != cudaSuccess) {
-            std::cerr << "CUDA malloc error: " << cudaGetErrorString(err) << std::endl;
-            throw std::runtime_error("CUDA malloc failed");
+        cudaError_t err3 = cudaGetLastError();
+        if(err3 != cudaSuccess) {
+            cudaFree(d_branchAllelesFlat);
+            cudaFree(d_leafGenotypesFlat);
+            throw std::runtime_error(std::string("CUDA malloc failed for distances: ") + cudaGetErrorString(err3));
         }
     }
 
-    
-    // Ensure we can open file
+    // Open main FASTA file
     std::ifstream fasta_file(fasta_filepath);
     if (!fasta_file.is_open()) {
         std::cerr << "Failed to open fasta_file\n";
         return;
     }
 
-    if(refName == "") {
-        throw std::runtime_error("Invalid refName");
-    }
-
-    
-
-    // Make a node for the reference
+    // Create root node
     InitNode* rootNode = new InitNode;
-    rootNode->name = ""; // Intentionally giving the root no name, as it has a child
+    rootNode->name = "";
     rootNode->parentBranch = nullptr;
     rootNode->childBranches = {};
-
-
-    
 
     // Valid tokens
     std::unordered_set<char> alphabet = {'A', 'C', 'G', 'T', 'N', '-'};
 
-    // Maintain vector of all branches
+    // Track all branches
     std::vector<InitBranch*> allBranches;
 
     line = "";
@@ -331,12 +334,10 @@ void processByLine(
 
     long long total_search_time = 0;
     long long total_attach_time = 0;
-
-    int num_sequences_processed = 0;
-
+    
+    size_t sequenceCount = 0;
 
     while (std::getline(fasta_file, line)) {
-
         if(line.empty()) continue;
 
         if(line[0] == '>') {
@@ -344,23 +345,24 @@ void processByLine(
             continue;
         }
 
-        // Check if we've hit the maximum number of branches
+        // Check if we've hit max branches
         if(allBranches.size() >= (size_t)maxBranches) {
             std::cout << "Reached maximum number of branches (" << maxBranches << "). Stopping early.\n";
             break;
         }
 
-        // Get genome (of relevant segment)
+        // Parse sequence
         std::string letters = line.substr(start_pos, L);
-
-        // Check ACGTN-
-        std::cout << "Checking alphabet for " << name << std::endl;
         checkAlphabet(letters, alphabet);
-
-        // Convert to 8 bit
         std::vector<uint8_t> leafGenotype = encodeString(letters);
 
-        
+        // Store leaf genotype in persistent GPU memory immediately
+        if(useGPU) {
+            uint8_t* dest = d_leafGenotypesFlat + (sequenceCount * L);
+            for(size_t j = 0; j < L; j++) {
+                dest[j] = leafGenotype[j];
+            }
+        }
 
         InitNode* node = new InitNode;
         if(name == "") {
@@ -370,12 +372,8 @@ void processByLine(
         node->childBranches = {};
         node->seq = letters;
 
-
-        // Time flows backwards from the present, with A1C meaning the C allele is ancestral, A is newer
-
-        // SPECIAL CASE: If no branches, create the first one
+        // FIRST BRANCH - special case
         if(allBranches.size() == 0) {
-            // First node processed
             InitBranch* branch = new InitBranch;
             branch->parent = rootNode;
             branch->child = node;
@@ -383,33 +381,34 @@ void processByLine(
             branch->nMuts = 0;
 
             for(size_t pos = 0; pos < L; pos++) {
-
                 if(isMissing(leafGenotype[pos])) {
                     branch->alleles[pos] = refGenotype[pos];
                     continue;
                 }
-
                 if(leafGenotype[pos] != refGenotype[pos]) {
                     branch->alleles[pos] = makeMutation(leafGenotype[pos], refGenotype[pos]);
                     branch->nMuts++;
-                }else{
+                } else {
                     branch->alleles[pos] = leafGenotype[pos];
                 }
             }
 
-            // Wire to nodes
             node->parentBranch = branch;
             rootNode->childBranches.push_back(branch);
-
-            // update allbranches
             allBranches.push_back(branch);
 
-            // Move on
-            continue;
+            // Copy first branch to GPU
+            if(useGPU) {
+                for(size_t j = 0; j < L; j++) {
+                    d_branchAllelesFlat[j] = branch->alleles[j];
+                }
+            }
 
+            sequenceCount++;
+            continue;
         }
 
-        // SEARCH FOR BEST BRANCH
+        // SEARCH FOR BEST ATTACHMENT BRANCH
         auto search_start = std::chrono::high_resolution_clock::now();
 
         size_t numBranches = allBranches.size();
@@ -418,37 +417,12 @@ void processByLine(
 
         if(useGPU) {
             // ============ GPU PATH ============
-            if(numBranches >= (size_t)maxBranches) {
-                throw std::runtime_error("Exceeded maxBranches limit");
-            }
+            
+            // Get pointer to current leaf genotype (already in GPU memory!)
+            uint8_t* d_leafGenotype = d_leafGenotypesFlat + (sequenceCount * L);
 
-            // Allocate unified memory for leaf genotype
-            uint8_t* d_leafGenotype;
-            cudaMallocManaged(&d_leafGenotype, L * sizeof(uint8_t));
-            for(size_t i = 0; i < L; i++) {
-                d_leafGenotype[i] = leafGenotype[i];
-            }
-
-            // Allocate unified memory for branch alleles (flat array)
-            uint8_t* d_branchAllelesFlat;
-            cudaMallocManaged(&d_branchAllelesFlat, numBranches * L * sizeof(uint8_t));
-
-            // Copy all branch alleles into flat array
-            for(size_t i = 0; i < numBranches; i++) {
-                for(size_t j = 0; j < L; j++) {
-                    d_branchAllelesFlat[i * L + j] = allBranches[i]->alleles[j];
-                }
-            }
-
-            // Create array of pointers into the flat array
-            uint8_t** d_branchAlleles;
-            cudaMallocManaged(&d_branchAlleles, numBranches * sizeof(uint8_t*));
-            for(size_t i = 0; i < numBranches; i++) {
-                d_branchAlleles[i] = d_branchAllelesFlat + (i * L);
-            }
-
-            // Call GPU kernel
-            computeDistancesGPU(d_leafGenotype, d_branchAlleles, d_distances, numBranches, L);
+            // Call GPU kernel with persistent memory - no allocations!
+            computeDistancesGPU(d_leafGenotype, d_branchAllelesFlat, d_distances, numBranches, L);
 
             // Find minimum distance on CPU
             for(size_t i = 0; i < numBranches; i++) {
@@ -458,11 +432,6 @@ void processByLine(
                 }
                 if(d_distances[i] == 0) break;
             }
-
-            // Free temporary GPU memory
-            cudaFree(d_leafGenotype);
-            cudaFree(d_branchAllelesFlat);
-            cudaFree(d_branchAlleles);
 
         } else {
             // ============ CPU PATH ============
@@ -480,40 +449,75 @@ void processByLine(
         total_search_time += std::chrono::duration_cast<std::chrono::microseconds>(
             search_end - search_start).count();
 
-        // Attach at that branch
+        // Find index of branch being attached to
+        size_t attachBranchIdx = SIZE_MAX;
+        for(size_t i = 0; i < allBranches.size(); i++) {
+            if(allBranches[i] == bestBranch) {
+                attachBranchIdx = i;
+                break;
+            }
+        }
+
+        size_t numBranchesBefore = allBranches.size();
+
+        // Attach to tree
         auto attach_start = std::chrono::high_resolution_clock::now();
         attach(node, leafGenotype, bestBranch, allBranches);
         auto attach_end = std::chrono::high_resolution_clock::now();
         total_attach_time += std::chrono::duration_cast<std::chrono::microseconds>(
             attach_end - attach_start).count();
 
+        // Update GPU memory for changed branches
+        if(useGPU) {
+            // Check if branch was split (creates 2 new branches instead of 1)
+            bool branchWasSplit = (allBranches.size() > numBranchesBefore + 1);
+            
+            if(branchWasSplit && attachBranchIdx != SIZE_MAX) {
+                // Original branch was modified - update it on GPU
+                uint8_t* dest = d_branchAllelesFlat + (attachBranchIdx * L);
+                for(size_t j = 0; j < L; j++) {
+                    dest[j] = allBranches[attachBranchIdx]->alleles[j];
+                }
+            }
+            
+            // Copy new branches to GPU (1-2 new branches)
+            for(size_t i = numBranchesBefore; i < allBranches.size(); i++) {
+                uint8_t* dest = d_branchAllelesFlat + (i * L);
+                for(size_t j = 0; j < L; j++) {
+                    dest[j] = allBranches[i]->alleles[j];
+                }
+            }
+        }
         
+        sequenceCount++;
     }
     
     fasta_file.close();
 
+    // Print performance stats
     std::cout << "\n=== Performance Stats ===\n";
+    std::cout << "Mode: " << (useGPU ? "GPU" : "CPU") << "\n";
+    std::cout << "Sequences processed: " << sequenceCount << "\n";
     std::cout << "Total search time: " << total_search_time / 1000.0 << " ms\n";
     std::cout << "Total attach time: " << total_attach_time / 1000.0 << " ms\n";
-    
 
     int totMutations = 0;
     for(InitBranch* b : allBranches) {
         totMutations += b->nMuts;
     }
+    std::cout << "Total Mutations: " << totMutations << std::endl;
 
+    // Free GPU memory once at the end
     if(useGPU) {
+        cudaFree(d_branchAllelesFlat);
+        cudaFree(d_leafGenotypesFlat);
         cudaFree(d_distances);
     }
 
-    std::cout << "Total Mutations: " << totMutations << std::endl;
-
+    // Validate tree structure
     checkTree(refGenotype, rootNode);
 
-    
-
-
-    // Cleanup
+    // Cleanup tree
     deleteInitTree(rootNode);
 }
 
