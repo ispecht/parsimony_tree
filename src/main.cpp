@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <random>
 #include <chrono>
+#include <cuda_runtime.h>
 #include "helpers.h"
 #include "debug.h"
 #include "structs.h"
@@ -232,7 +233,8 @@ void processByLine(
     const std::string& fasta_filepath,
     const std::string& ref_filepath,
     int start_pos, // Inclusive; 0-indexed
-    int end_pos // Exclusive; 0-indexed
+    int end_pos, // Exclusive; 0-indexed
+    int maxBranches
 ) {
 
     // Genome length
@@ -252,6 +254,9 @@ void processByLine(
     }
 
     std::vector<uint8_t> refGenotype;
+
+    int* d_distances;
+    cudaMallocManaged(&d_distances, maxBranches * sizeof(int));
 
     while (std::getline(ref_fasta_file, line)) {
 
@@ -386,28 +391,47 @@ void processByLine(
 
         }
 
-        // O(N^2) step: check all other branches for best attachment point
-        // Time the search
+        // GPU-ACCELERATED SEARCH
         auto search_start = std::chrono::high_resolution_clock::now();
-
+        
+        size_t numBranches = allBranches.size();
+        
+        // Allocate unified memory for leaf genotype
+        uint8_t* d_leafGenotype;
+        cudaMallocManaged(&d_leafGenotype, L * sizeof(uint8_t));
+        for(size_t i = 0; i < L; i++) {
+            d_leafGenotype[i] = leafGenotype[i];
+        }
+        
+        // Create array of pointers to branch alleles
+        uint8_t** d_branchAlleles;
+        cudaMallocManaged(&d_branchAlleles, numBranches * sizeof(uint8_t*));
+        for(size_t i = 0; i < numBranches; i++) {
+            d_branchAlleles[i] = allBranches[i]->alleles.data();
+        }
+        
+        // Call GPU kernel
+        computeDistancesGPU(d_leafGenotype, d_branchAlleles, d_distances, numBranches, L);
+        
+        // Find minimum distance on CPU
         int bestDist = std::numeric_limits<int>::max();
         InitBranch* bestBranch = nullptr;
-
-        for(InitBranch* b : allBranches) {
-            int dist = evoDistance(leafGenotype, b->alleles);
-            if(dist < bestDist) {
-                bestDist = dist;
-                bestBranch = b;
+        
+        for(size_t i = 0; i < numBranches; i++) {
+            if(d_distances[i] < bestDist) {
+                bestDist = d_distances[i];
+                bestBranch = allBranches[i];
             }
-
-            if(dist == 0) {
-                break;
-            }
+            if(d_distances[i] == 0) break;  // Early exit for perfect match
         }
-
+        
         auto search_end = std::chrono::high_resolution_clock::now();
         total_search_time += std::chrono::duration_cast<std::chrono::microseconds>(
             search_end - search_start).count();
+        
+        // Free temporary GPU memory
+        cudaFree(d_leafGenotype);
+        cudaFree(d_branchAlleles);
 
         // Attach at that branch
         auto attach_start = std::chrono::high_resolution_clock::now();
@@ -430,9 +454,13 @@ void processByLine(
         totMutations += b->nMuts;
     }
 
+    cudaFree(d_distances);
+
     std::cout << "Total Mutations: " << totMutations << std::endl;
 
     checkTree(refGenotype, rootNode);
+
+    
 
 
     // Cleanup
@@ -440,7 +468,7 @@ void processByLine(
 }
 
 int main(int argc, char* argv[]) {
-    if(argc != 5) {
+    if(argc != 6) {
         std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <start_pos> <end_pos>\n";
         return 1;
     }
@@ -449,8 +477,9 @@ int main(int argc, char* argv[]) {
     std::string ref_filepath = argv[2];
     int start_pos = std::stoi(argv[3]);
     int end_pos = std::stoi(argv[4]);
+    int maxBranches = std::stoi(argv[5]);
 
-    processByLine(fasta_filepath, ref_filepath, start_pos, end_pos);
+    processByLine(fasta_filepath, ref_filepath, start_pos, end_pos, maxBranches);
 
     std::cout << "Done!" << std::endl;
 

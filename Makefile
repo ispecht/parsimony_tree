@@ -1,7 +1,8 @@
 # Compiler and flags
 CXX := g++
+NVCC := nvcc
 CXXFLAGS := -std=c++20 -Wall -Wextra -O3 -march=native
-DEBUGFLAGS := -g -O0 -DDEBUG
+NVCCFLAGS := -O3 -std=c++17 --compiler-options -fPIC
 
 # Directories
 SRC_DIR := src
@@ -13,12 +14,18 @@ BIN_DIR := bin
 TARGET := $(BIN_DIR)/parsimony_tree
 
 # Source files
-SOURCES := $(wildcard $(SRC_DIR)/*.cpp)
-OBJECTS := $(SOURCES:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
-DEPS := $(OBJECTS:.o=.d)
+CXX_SOURCES := $(wildcard $(SRC_DIR)/*.cpp)
+CU_SOURCES := $(wildcard $(SRC_DIR)/*.cu)
+CXX_OBJECTS := $(CXX_SOURCES:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
+CU_OBJECTS := $(CU_SOURCES:$(SRC_DIR)/%.cu=$(BUILD_DIR)/%.o)
 
-# Include directories
-INCLUDES := -I$(INC_DIR)
+OBJECTS := $(CXX_OBJECTS) $(CU_OBJECTS)
+
+# CUDA paths (adjust if needed)
+CUDA_PATH := /usr/local/cuda
+CUDA_INC := $(CUDA_PATH)/include
+CUDA_LIB := $(CUDA_PATH)/lib64
+CUDA_LIBS := -lcudart
 
 # Default target
 all: directories $(TARGET)
@@ -29,23 +36,20 @@ directories:
 
 # Link executable
 $(TARGET): $(OBJECTS)
-	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $@
+	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $@ -L$(CUDA_LIB) $(CUDA_LIBS)
 	@echo "Built: $(TARGET)"
 
-# Compile source files
+# Compile C++ source files
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -I$(CUDA_INC) -c $< -o $@
 
-# Debug build
-debug: CXXFLAGS := -std=c++20 -Wall -Wextra $(DEBUGFLAGS)
-debug: clean all
+# Compile CUDA source files
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cu
+	$(NVCC) $(NVCCFLAGS) -I$(INC_DIR) -c $< -o $@
 
 # Clean build artifacts
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
 
 # Phony targets
-.PHONY: all clean debug directories
-
-# Include dependency files
--include $(DEPS)
+.PHONY: all clean directories
