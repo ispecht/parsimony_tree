@@ -285,29 +285,56 @@ void processByLine(
     int* d_distances = nullptr;
     
     if(useGPU) {
+
+        // ADD STEP 3 HERE - Check if GPU is available
+        int deviceCount = 0;
+        cudaError_t err = cudaGetDeviceCount(&deviceCount);
+        if(err != cudaSuccess || deviceCount == 0) {
+            throw std::runtime_error("No CUDA-capable GPU found!");
+        }
+        
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, 0);
+        std::cout << "Using GPU: " << prop.name << "\n";
+        std::cout << "GPU memory: " << prop.totalGlobalMem / 1e9 << " GB\n";
+        
+        size_t branchBytes = maxBranches * L * sizeof(uint8_t);
+        size_t leafBytes = maxBranches * L * sizeof(uint8_t);
+        size_t distBytes = maxBranches * sizeof(int);
+        size_t totalBytes = branchBytes + leafBytes + distBytes;
+        
+        std::cout << "Allocating GPU memory:\n";
+        std::cout << "  Branches: " << branchBytes / 1e6 << " MB\n";
+        std::cout << "  Leaves: " << leafBytes / 1e6 << " MB\n";
+        std::cout << "  Distances: " << distBytes / 1e6 << " MB\n";
+        std::cout << "  Total: " << totalBytes / 1e6 << " MB\n";
+        
         // Allocate for branch alleles
-        cudaMallocManaged(&d_branchAllelesFlat, maxBranches * L * sizeof(uint8_t));
-        cudaError_t err1 = cudaGetLastError();
+        std::cout << "Allocating d_branchAllelesFlat..." << std::flush;
+        cudaError_t err1 = cudaMallocManaged(&d_branchAllelesFlat, branchBytes);
         if(err1 != cudaSuccess) {
             throw std::runtime_error(std::string("CUDA malloc failed for branches: ") + cudaGetErrorString(err1));
         }
+        std::cout << " OK\n";
         
         // Allocate for leaf genotypes
-        cudaMallocManaged(&d_leafGenotypesFlat, maxBranches * L * sizeof(uint8_t));
-        cudaError_t err2 = cudaGetLastError();
+        std::cout << "Allocating d_leafGenotypesFlat..." << std::flush;
+        cudaError_t err2 = cudaMallocManaged(&d_leafGenotypesFlat, leafBytes);
         if(err2 != cudaSuccess) {
             cudaFree(d_branchAllelesFlat);
             throw std::runtime_error(std::string("CUDA malloc failed for leaves: ") + cudaGetErrorString(err2));
         }
+        std::cout << " OK\n";
         
         // Allocate for distances
-        cudaMallocManaged(&d_distances, maxBranches * sizeof(int));
-        cudaError_t err3 = cudaGetLastError();
+        std::cout << "Allocating d_distances..." << std::flush;
+        cudaError_t err3 = cudaMallocManaged(&d_distances, distBytes);
         if(err3 != cudaSuccess) {
             cudaFree(d_branchAllelesFlat);
             cudaFree(d_leafGenotypesFlat);
             throw std::runtime_error(std::string("CUDA malloc failed for distances: ") + cudaGetErrorString(err3));
         }
+        std::cout << " OK\n";
     }
 
     // Open main FASTA file
@@ -538,7 +565,12 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Running in " << (useGPU ? "GPU" : "CPU") << " mode\n";
 
-    processByLine(fasta_filepath, ref_filepath, start_pos, end_pos, maxBranches, useGPU);
+    try {
+        processByLine(fasta_filepath, ref_filepath, start_pos, end_pos, maxBranches, useGPU);
+    } catch(const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
+    }
 
     std::cout << "Done!" << std::endl;
 
