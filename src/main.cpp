@@ -234,7 +234,8 @@ void processByLine(
     const std::string& ref_filepath,
     int start_pos, // Inclusive; 0-indexed
     int end_pos, // Exclusive; 0-indexed
-    int maxBranches
+    int maxBranches,
+    bool useGPU
 ) {
 
     // Genome length
@@ -284,8 +285,16 @@ void processByLine(
 
     ref_fasta_file.close();
 
-    int* d_distances;
-    cudaMallocManaged(&d_distances, maxBranches * sizeof(int));
+    // Only allocate GPU memory if using GPU
+    int* d_distances = nullptr;
+    if(useGPU) {
+        cudaMallocManaged(&d_distances, maxBranches * sizeof(int));
+        cudaError_t err = cudaGetLastError();
+        if(err != cudaSuccess) {
+            std::cerr << "CUDA malloc error: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("CUDA malloc failed");
+        }
+    }
 
     cudaError_t err = cudaGetLastError();
     if(err != cudaSuccess) {
@@ -397,54 +406,71 @@ void processByLine(
 
         }
 
-        // GPU-ACCELERATED SEARCH
+        // SEARCH FOR BEST BRANCH
         auto search_start = std::chrono::high_resolution_clock::now();
 
         size_t numBranches = allBranches.size();
-
-        // Check if we're exceeding maxBranches
-        if(numBranches >= (size_t)maxBranches) {
-            throw std::runtime_error("Exceeded maxBranches limit");
-        }
-
-        // Allocate unified memory for leaf genotype
-        uint8_t* d_leafGenotype;
-        cudaMallocManaged(&d_leafGenotype, L * sizeof(uint8_t));
-        for(size_t i = 0; i < L; i++) {
-            d_leafGenotype[i] = leafGenotype[i];
-        }
-
-        // Allocate unified memory for branch alleles (flat array)
-        uint8_t* d_branchAllelesFlat;
-        cudaMallocManaged(&d_branchAllelesFlat, numBranches * L * sizeof(uint8_t));
-
-        // Copy all branch alleles into flat array
-        for(size_t i = 0; i < numBranches; i++) {
-            for(size_t j = 0; j < L; j++) {
-                d_branchAllelesFlat[i * L + j] = allBranches[i]->alleles[j];
-            }
-        }
-
-        // Create array of pointers into the flat array
-        uint8_t** d_branchAlleles;
-        cudaMallocManaged(&d_branchAlleles, numBranches * sizeof(uint8_t*));
-        for(size_t i = 0; i < numBranches; i++) {
-            d_branchAlleles[i] = d_branchAllelesFlat + (i * L);
-        }
-
-        // Call GPU kernel
-        computeDistancesGPU(d_leafGenotype, d_branchAlleles, d_distances, numBranches, L);
-
-        // Find minimum distance on CPU
         int bestDist = std::numeric_limits<int>::max();
         InitBranch* bestBranch = nullptr;
 
-        for(size_t i = 0; i < numBranches; i++) {
-            if(d_distances[i] < bestDist) {
-                bestDist = d_distances[i];
-                bestBranch = allBranches[i];
+        if(useGPU) {
+            // ============ GPU PATH ============
+            if(numBranches >= (size_t)maxBranches) {
+                throw std::runtime_error("Exceeded maxBranches limit");
             }
-            if(d_distances[i] == 0) break;
+
+            // Allocate unified memory for leaf genotype
+            uint8_t* d_leafGenotype;
+            cudaMallocManaged(&d_leafGenotype, L * sizeof(uint8_t));
+            for(size_t i = 0; i < L; i++) {
+                d_leafGenotype[i] = leafGenotype[i];
+            }
+
+            // Allocate unified memory for branch alleles (flat array)
+            uint8_t* d_branchAllelesFlat;
+            cudaMallocManaged(&d_branchAllelesFlat, numBranches * L * sizeof(uint8_t));
+
+            // Copy all branch alleles into flat array
+            for(size_t i = 0; i < numBranches; i++) {
+                for(size_t j = 0; j < L; j++) {
+                    d_branchAllelesFlat[i * L + j] = allBranches[i]->alleles[j];
+                }
+            }
+
+            // Create array of pointers into the flat array
+            uint8_t** d_branchAlleles;
+            cudaMallocManaged(&d_branchAlleles, numBranches * sizeof(uint8_t*));
+            for(size_t i = 0; i < numBranches; i++) {
+                d_branchAlleles[i] = d_branchAllelesFlat + (i * L);
+            }
+
+            // Call GPU kernel
+            computeDistancesGPU(d_leafGenotype, d_branchAlleles, d_distances, numBranches, L);
+
+            // Find minimum distance on CPU
+            for(size_t i = 0; i < numBranches; i++) {
+                if(d_distances[i] < bestDist) {
+                    bestDist = d_distances[i];
+                    bestBranch = allBranches[i];
+                }
+                if(d_distances[i] == 0) break;
+            }
+
+            // Free temporary GPU memory
+            cudaFree(d_leafGenotype);
+            cudaFree(d_branchAllelesFlat);
+            cudaFree(d_branchAlleles);
+
+        } else {
+            // ============ CPU PATH ============
+            for(InitBranch* b : allBranches) {
+                int dist = evoDistance(leafGenotype, b->alleles);
+                if(dist < bestDist) {
+                    bestDist = dist;
+                    bestBranch = b;
+                }
+                if(dist == 0) break;
+            }
         }
 
         auto search_end = std::chrono::high_resolution_clock::now();
@@ -477,7 +503,9 @@ void processByLine(
         totMutations += b->nMuts;
     }
 
-    cudaFree(d_distances);
+    if(useGPU) {
+        cudaFree(d_distances);
+    }
 
     std::cout << "Total Mutations: " << totMutations << std::endl;
 
@@ -491,8 +519,10 @@ void processByLine(
 }
 
 int main(int argc, char* argv[]) {
-    if(argc != 6) {
-        std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <start_pos> <end_pos> <max_branches>\n";
+    if(argc != 7) {
+        std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <start_pos> <end_pos> <max_branches> <use_gpu>\n";
+        std::cerr << "  use_gpu: 0 for CPU, 1 for GPU\n";
+        std::cerr << "Example: " << argv[0] << " data.fasta ref.fasta 0 30000 10000 1\n";
         return 1;
     }
 
@@ -501,8 +531,11 @@ int main(int argc, char* argv[]) {
     int start_pos = std::stoi(argv[3]);
     int end_pos = std::stoi(argv[4]);
     int maxBranches = std::stoi(argv[5]);
+    bool useGPU = (std::stoi(argv[6]) != 0);
 
-    processByLine(fasta_filepath, ref_filepath, start_pos, end_pos, maxBranches);
+    std::cout << "Running in " << (useGPU ? "GPU" : "CPU") << " mode\n";
+
+    processByLine(fasta_filepath, ref_filepath, start_pos, end_pos, maxBranches, useGPU);
 
     std::cout << "Done!" << std::endl;
 
