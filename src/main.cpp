@@ -512,16 +512,14 @@ void processByLine(
             
             if(branchWasSplit && attachBranchIdx != SIZE_MAX) {
                 uint8_t* dest = d_branchAllelesFlat + (attachBranchIdx * L);
-                for(size_t j = 0; j < L; j++) {
-                    dest[j] = allBranches[attachBranchIdx]->alleles[j];
-                }
+                cudaMemcpy(dest, allBranches[attachBranchIdx]->alleles.data(), 
+                        L * sizeof(uint8_t), cudaMemcpyHostToDevice);
             }
             
             for(size_t i = numBranchesBefore; i < allBranches.size(); i++) {
                 uint8_t* dest = d_branchAllelesFlat + (i * L);
-                for(size_t j = 0; j < L; j++) {
-                    dest[j] = allBranches[i]->alleles[j];
-                }
+                cudaMemcpy(dest, allBranches[i]->alleles.data(), 
+                        L * sizeof(uint8_t), cudaMemcpyHostToDevice);
             }
             
             auto gpu_update_end = std::chrono::high_resolution_clock::now();
