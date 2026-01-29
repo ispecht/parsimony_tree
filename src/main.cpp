@@ -335,6 +335,18 @@ void processByLine(
             throw std::runtime_error(std::string("CUDA malloc failed for distances: ") + cudaGetErrorString(err3));
         }
         std::cout << " OK\n";
+
+        // ADD THESE LINES HERE:
+        // Initialize CUDA and prefetch memory to GPU
+        std::cout << "Initializing CUDA and prefetching memory to GPU..." << std::flush;
+        
+        int device = 0;
+        cudaMemPrefetchAsync(d_branchAllelesFlat, maxBranches * L * sizeof(uint8_t), device);
+        cudaMemPrefetchAsync(d_leafGenotypesFlat, maxBranches * L * sizeof(uint8_t), device);
+        cudaMemPrefetchAsync(d_distances, maxBranches * sizeof(int), device);
+        
+        cudaDeviceSynchronize();
+        std::cout << " OK\n";
     }
 
     // Open main FASTA file
