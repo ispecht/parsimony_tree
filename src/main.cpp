@@ -279,6 +279,7 @@ void processByLine(
 
         std::string letters = line.substr(start_pos, L);
         // Check ref has all valid tokens
+        std::cout << "Checking alphabet for ref" << std::endl;
         checkAlphabet(letters, {'A', 'C', 'G', 'T'});
         refGenotype = encodeString(letters);
     }
@@ -353,6 +354,7 @@ void processByLine(
         std::string letters = line.substr(start_pos, L);
 
         // Check ACGTN-
+        std::cout << "Checking alphabet for " << name << std::endl;
         checkAlphabet(letters, alphabet);
 
         // Convert to 8 bit
