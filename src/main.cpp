@@ -255,9 +255,6 @@ void processByLine(
 
     std::vector<uint8_t> refGenotype;
 
-    int* d_distances;
-    cudaMallocManaged(&d_distances, maxBranches * sizeof(int));
-
     while (std::getline(ref_fasta_file, line)) {
 
         if(line.empty()) continue;
@@ -267,16 +264,16 @@ void processByLine(
             continue;
         }
 
-        if(start_pos < 0 || start_pos > line.size()) {
+        if(start_pos < 0 || (size_t)start_pos > line.size()) {
             throw std::runtime_error("Start pos out of bounds");
+        }
+
+        if((size_t)end_pos > line.size()) {
+            throw std::runtime_error("end pos too big");
         }
 
         if(end_pos <= start_pos) {
             throw std::runtime_error("End pos <= start_pos");
-        }
-
-        if(end_pos > line.size()) {
-            throw std::runtime_error("end pos too big");
         }
 
         std::string letters = line.substr(start_pos, L);
@@ -286,6 +283,15 @@ void processByLine(
     }
 
     ref_fasta_file.close();
+
+    int* d_distances;
+    cudaMallocManaged(&d_distances, maxBranches * sizeof(int));
+
+    cudaError_t err = cudaGetLastError();
+    if(err != cudaSuccess) {
+        std::cerr << "CUDA malloc error: " << cudaGetErrorString(err) << std::endl;
+        throw std::runtime_error("CUDA malloc failed");
+    }
 
     
     // Ensure we can open file
@@ -469,7 +475,7 @@ void processByLine(
 
 int main(int argc, char* argv[]) {
     if(argc != 6) {
-        std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <start_pos> <end_pos>\n";
+        std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <start_pos> <end_pos> <max_branches>\n";
         return 1;
     }
 
