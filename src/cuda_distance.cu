@@ -42,13 +42,11 @@ extern "C" void computeDistancesGPU(
 ) {
     if(numBranches == 0) return;
     
-    std::cout << "GPU: numBranches=" << numBranches << ", L=" << L << std::endl;
     
     // Launch kernel
     int threadsPerBlock = 256;
     int blocksPerGrid = (numBranches + threadsPerBlock - 1) / threadsPerBlock;
     
-    std::cout << "GPU: blocks=" << blocksPerGrid << ", threads=" << threadsPerBlock << std::endl;
     
     evoDistanceKernel<<<blocksPerGrid, threadsPerBlock>>>(
         d_leafGenotype,
@@ -72,5 +70,4 @@ extern "C" void computeDistancesGPU(
         throw std::runtime_error(std::string("CUDA kernel execution failed: ") + cudaGetErrorString(syncErr));
     }
     
-    std::cout << "GPU: kernel completed successfully" << std::endl;
 }
