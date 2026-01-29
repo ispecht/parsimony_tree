@@ -362,6 +362,8 @@ void processByLine(
 
     long long total_search_time = 0;
     long long total_attach_time = 0;
+    long long total_gpu_update_time = 0;  // NEW
+
     
     size_t sequenceCount = 0;
 
@@ -503,26 +505,28 @@ void processByLine(
         total_attach_time += std::chrono::duration_cast<std::chrono::microseconds>(
             attach_end - attach_start).count();
 
-        // Update GPU memory for changed branches
         if(useGPU) {
-            // Check if branch was split (creates 2 new branches instead of 1)
+            auto gpu_update_start = std::chrono::high_resolution_clock::now();
+            
             bool branchWasSplit = (allBranches.size() > numBranchesBefore + 1);
             
             if(branchWasSplit && attachBranchIdx != SIZE_MAX) {
-                // Original branch was modified - update it on GPU
                 uint8_t* dest = d_branchAllelesFlat + (attachBranchIdx * L);
                 for(size_t j = 0; j < L; j++) {
                     dest[j] = allBranches[attachBranchIdx]->alleles[j];
                 }
             }
             
-            // Copy new branches to GPU (1-2 new branches)
             for(size_t i = numBranchesBefore; i < allBranches.size(); i++) {
                 uint8_t* dest = d_branchAllelesFlat + (i * L);
                 for(size_t j = 0; j < L; j++) {
                     dest[j] = allBranches[i]->alleles[j];
                 }
             }
+            
+            auto gpu_update_end = std::chrono::high_resolution_clock::now();
+            total_gpu_update_time += std::chrono::duration_cast<std::chrono::microseconds>(
+                gpu_update_end - gpu_update_start).count();
         }
         
         sequenceCount++;
@@ -530,12 +534,14 @@ void processByLine(
     
     fasta_file.close();
 
-    // Print performance stats
     std::cout << "\n=== Performance Stats ===\n";
     std::cout << "Mode: " << (useGPU ? "GPU" : "CPU") << "\n";
     std::cout << "Sequences processed: " << sequenceCount << "\n";
     std::cout << "Total search time: " << total_search_time / 1000.0 << " ms\n";
     std::cout << "Total attach time: " << total_attach_time / 1000.0 << " ms\n";
+    if(useGPU) {
+        std::cout << "Total GPU update time: " << total_gpu_update_time / 1000.0 << " ms\n";
+    }
 
     int totMutations = 0;
     for(InitBranch* b : allBranches) {
