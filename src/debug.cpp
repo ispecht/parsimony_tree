@@ -19,6 +19,7 @@ void checkAlphabet(const std::string& leafGenotype, const std::unordered_set<cha
 
     for(size_t i = 0; i < leafGenotype.size(); i++) {
         if(!alphabet.contains(leafGenotype[i])) {
+            std::cout << leafGenotype[i] << std::endl;
             throw std::runtime_error("Invalid character");
         }
     }
