@@ -330,7 +330,8 @@ void processByLine(
 
     long long total_search_time = 0;
     long long total_attach_time = 0;
-    int num_sequences = 0;
+
+    int num_sequences_processed = 0;
 
 
     while (std::getline(fasta_file, line)) {
@@ -340,6 +341,12 @@ void processByLine(
         if(line[0] == '>') {
             name = line.substr(1, line.size() - 1);
             continue;
+        }
+
+        // Check if we've hit the maximum number of branches
+        if(allBranches.size() >= (size_t)maxBranches) {
+            std::cout << "Reached maximum number of branches (" << maxBranches << "). Stopping early.\n";
+            break;
         }
 
         // Get genome (of relevant segment)
@@ -478,6 +485,7 @@ void processByLine(
         total_attach_time += std::chrono::duration_cast<std::chrono::microseconds>(
             attach_end - attach_start).count();
 
+        
     }
     
     fasta_file.close();
