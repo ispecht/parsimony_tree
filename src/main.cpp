@@ -336,17 +336,6 @@ void processByLine(
         }
         std::cout << " OK\n";
 
-        // ADD THESE LINES HERE:
-        // Initialize CUDA and prefetch memory to GPU
-        std::cout << "Initializing CUDA and prefetching memory to GPU..." << std::flush;
-        
-        int device = 0;
-        cudaMemPrefetchAsync(d_branchAllelesFlat, maxBranches * L * sizeof(uint8_t), device);
-        cudaMemPrefetchAsync(d_leafGenotypesFlat, maxBranches * L * sizeof(uint8_t), device);
-        cudaMemPrefetchAsync(d_distances, maxBranches * sizeof(int), device);
-        
-        cudaDeviceSynchronize();
-        std::cout << " OK\n";
     }
 
     // Open main FASTA file
@@ -385,7 +374,7 @@ void processByLine(
             continue;
         }
 
-        std::cout << " (seq " << sequenceCount << ")" << std::endl;  // ADD THIS
+        //std::cout << " (seq " << sequenceCount << ")" << std::endl;  // ADD THIS
 
         // CHECK LIMIT with safety margin (each sequence can create up to 2 branches)
         if(allBranches.size() + 2 >= (size_t)maxBranches) {
