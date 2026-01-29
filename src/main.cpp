@@ -324,7 +324,7 @@ void processByLine(
     rootNode->childBranches = {};
 
     // Valid tokens
-    std::unordered_set<char> alphabet = {'A', 'C', 'G', 'T', 'N', '-'};
+    std::unordered_set<char> alphabet = {'A', 'C', 'G', 'T'};
 
     // Track all branches
     std::vector<InitBranch*> allBranches;
@@ -353,7 +353,7 @@ void processByLine(
 
         // Parse sequence
         std::string letters = line.substr(start_pos, L);
-        checkAlphabet(letters, alphabet);
+        //checkAlphabet(letters, alphabet);
         std::vector<uint8_t> leafGenotype = encodeString(letters);
 
         // Store leaf genotype in persistent GPU memory immediately

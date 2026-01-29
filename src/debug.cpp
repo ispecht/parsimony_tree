@@ -38,7 +38,12 @@ void checkTreeAtPosRec(
             throw std::runtime_error("Decoding should never yield N");
         }
         
-        if((node->seq[pos] != 'N') && (node->seq[pos] != '-')){
+        if(
+            (node->seq[pos] == 'A') ||
+            (node->seq[pos] != 'C') ||
+            (node->seq[pos] != 'G') ||
+            (node->seq[pos] != 'T')
+        ){
             if(letter != node->seq[pos]){
                 throw std::runtime_error("Mismatch at leaf");
             } 

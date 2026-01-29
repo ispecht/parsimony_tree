@@ -13,9 +13,7 @@
 #include "helpers.h"
 
 uint8_t encodeBase(char c) {
-    if(c == 'N' || c == '-') {
-        return 0;
-    }else if(c == 'A') {
+    if(c == 'A') {
         return 1;
     }else if(c == 'C') {
         return 2;
@@ -24,14 +22,12 @@ uint8_t encodeBase(char c) {
     }else if (c == 'T') {
         return 8;
     }else{
-        throw std::runtime_error("Unknown nucleotide");
+        return 0;
     }
 }
 
 char decodeBase(uint8_t encoding) {
-    if(encoding == 0) {
-        return 'N';
-    }else if(encoding == 1) {
+    if(encoding == 1) {
         return 'A';
     }else if(encoding == 2) {
         return 'C';
@@ -40,7 +36,7 @@ char decodeBase(uint8_t encoding) {
     }else if(encoding == 8) {
         return 'T';
     }else{
-        throw std::runtime_error("Unknown encoding");
+        return 'N';
     }
 }
 
