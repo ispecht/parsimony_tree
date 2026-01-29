@@ -365,17 +365,29 @@ void processByLine(
     
     size_t sequenceCount = 0;
 
+    // Read entire file into memory first
+    std::cout << "Reading entire FASTA into memory..." << std::flush;
+    std::ifstream fasta_file(fasta_filepath);
+    std::stringstream buffer;
+    buffer << fasta_file.rdbuf();
+    std::string fasta_content = buffer.str();
+    fasta_file.close();
+    std::cout << " OK (" << fasta_content.size() / 1e6 << " MB)\n";
+
+    // Parse from memory
+    std::istringstream fasta_stream(fasta_content);
+
     std::cout << "Entering fasta processing step..." << std::endl;
-    while (std::getline(fasta_file, line)) {
+    while (std::getline(fasta_stream, line)) {
         if(line.empty()) continue;
 
         if(line[0] == '>') {
             name = line.substr(1, line.size() - 1);
-            //std::cout << "Processing sequence: " << name << std::flush;  // ADD THIS
+            std::cout << "Processing sequence: " << name << std::flush;  // ADD THIS
             continue;
         }
 
-        //std::cout << " (seq " << sequenceCount << ")" << std::endl;  // ADD THIS
+        std::cout << " (seq " << sequenceCount << ")" << std::endl;  // ADD THIS
 
         // CHECK LIMIT with safety margin (each sequence can create up to 2 branches)
         if(allBranches.size() + 2 >= (size_t)maxBranches) {
