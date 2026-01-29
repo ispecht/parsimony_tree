@@ -296,12 +296,6 @@ void processByLine(
         }
     }
 
-    cudaError_t err = cudaGetLastError();
-    if(err != cudaSuccess) {
-        std::cerr << "CUDA malloc error: " << cudaGetErrorString(err) << std::endl;
-        throw std::runtime_error("CUDA malloc failed");
-    }
-
     
     // Ensure we can open file
     std::ifstream fasta_file(fasta_filepath);
@@ -476,11 +470,6 @@ void processByLine(
         auto search_end = std::chrono::high_resolution_clock::now();
         total_search_time += std::chrono::duration_cast<std::chrono::microseconds>(
             search_end - search_start).count();
-
-        // Free temporary GPU memory
-        cudaFree(d_leafGenotype);
-        cudaFree(d_branchAllelesFlat);
-        cudaFree(d_branchAlleles);
 
         // Attach at that branch
         auto attach_start = std::chrono::high_resolution_clock::now();
