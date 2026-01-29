@@ -381,7 +381,7 @@ void processByLine(
 
         if(line[0] == '>') {
             name = line.substr(1, line.size() - 1);
-            std::cout << "Processing sequence: " << name << std::flush;  // ADD THIS
+            //std::cout << "Processing sequence: " << name << std::flush;  // ADD THIS
             continue;
         }
 
@@ -401,12 +401,12 @@ void processByLine(
 
         // Store leaf genotype in persistent GPU memory immediately
         if(useGPU) {
-            std::cout << "  Storing leaf " << sequenceCount << " in GPU memory..." << std::flush;
+            //std::cout << "  Storing leaf " << sequenceCount << " in GPU memory..." << std::flush;
             uint8_t* dest = d_leafGenotypesFlat + (sequenceCount * L);
             for(size_t j = 0; j < L; j++) {
                 dest[j] = leafGenotype[j];
             }
-            std::cout << " OK\n" << std::flush;
+            //std::cout << " OK\n" << std::flush;
         }
 
         InitNode* node = new InitNode;
@@ -444,11 +444,11 @@ void processByLine(
 
             // Copy first branch to GPU
             if(useGPU) {
-                std::cout << "  Copying first branch to GPU..." << std::flush;
+                //std::cout << "  Copying first branch to GPU..." << std::flush;
                 for(size_t j = 0; j < L; j++) {
                     d_branchAllelesFlat[j] = branch->alleles[j];
                 }
-                std::cout << " OK\n" << std::flush;
+                //std::cout << " OK\n" << std::flush;
             }
 
             sequenceCount++;
@@ -465,10 +465,10 @@ void processByLine(
         if(useGPU) {
             // ============ GPU PATH ============
             
-            std::cout << "  Calling GPU kernel (numBranches=" << numBranches << ")..." << std::flush;
+            //std::cout << "  Calling GPU kernel (numBranches=" << numBranches << ")..." << std::flush;
             uint8_t* d_leafGenotype = d_leafGenotypesFlat + (sequenceCount * L);
             computeDistancesGPU(d_leafGenotype, d_branchAllelesFlat, d_distances, numBranches, L);
-            std::cout << " OK\n" << std::flush;
+            //std::cout << " OK\n" << std::flush;
 
             // Find minimum distance on CPU
             for(size_t i = 0; i < numBranches; i++) {
