@@ -40,9 +40,9 @@ void checkTreeAtPosRec(
         
         if(
             (node->seq[pos] == 'A') ||
-            (node->seq[pos] != 'C') ||
-            (node->seq[pos] != 'G') ||
-            (node->seq[pos] != 'T')
+            (node->seq[pos] == 'C') ||
+            (node->seq[pos] == 'G') ||
+            (node->seq[pos] == 'T')
         ){
             if(letter != node->seq[pos]){
                 throw std::runtime_error("Mismatch at leaf");
