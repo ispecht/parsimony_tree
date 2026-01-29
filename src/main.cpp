@@ -281,7 +281,7 @@ void processByLine(
 
     // PERSISTENT GPU MEMORY - allocate once for entire run
     uint8_t* d_branchAllelesFlat = nullptr;
-    uint8_t* d_leafGenotypesFlat = nullptr;
+    uint8_t* d_leafGenotype = nullptr;
     int* d_distances = nullptr;
     
     if(useGPU) {
@@ -299,13 +299,11 @@ void processByLine(
         std::cout << "GPU memory: " << prop.totalGlobalMem / 1e9 << " GB\n";
 
         size_t branchBytes = maxBranches * L * sizeof(uint8_t);
-        size_t leafBytes = maxBranches * L * sizeof(uint8_t);
         size_t distBytes = maxBranches * sizeof(int);
-        size_t totalBytes = branchBytes + leafBytes + distBytes;
+        size_t totalBytes = branchBytes + distBytes;  // Remove leafBytes
         
         std::cout << "Allocating GPU memory:\n";
         std::cout << "  Branches: " << branchBytes / 1e6 << " MB\n";
-        std::cout << "  Leaves: " << leafBytes / 1e6 << " MB\n";
         std::cout << "  Distances: " << distBytes / 1e6 << " MB\n";
         std::cout << "  Total: " << totalBytes / 1e6 << " MB\n";
         
@@ -317,22 +315,22 @@ void processByLine(
         }
         std::cout << " OK\n";
         
-        // Allocate for leaf genotypes
-        std::cout << "Allocating d_leafGenotypesFlat..." << std::flush;
-        cudaError_t err2 = cudaMallocManaged(&d_leafGenotypesFlat, leafBytes);
-        if(err2 != cudaSuccess) {
-            cudaFree(d_branchAllelesFlat);
-            throw std::runtime_error(std::string("CUDA malloc failed for leaves: ") + cudaGetErrorString(err2));
-        }
-        std::cout << " OK\n";
-        
         // Allocate for distances
         std::cout << "Allocating d_distances..." << std::flush;
         cudaError_t err3 = cudaMallocManaged(&d_distances, distBytes);
         if(err3 != cudaSuccess) {
             cudaFree(d_branchAllelesFlat);
-            cudaFree(d_leafGenotypesFlat);
             throw std::runtime_error(std::string("CUDA malloc failed for distances: ") + cudaGetErrorString(err3));
+        }
+        std::cout << " OK\n";
+
+        // Allocate single reusable leaf buffer
+        std::cout << "Allocating d_leafGenotype (single)..." << std::flush;
+        cudaError_t err_leaf = cudaMallocManaged(&d_leafGenotype, L * sizeof(uint8_t));
+        if(err_leaf != cudaSuccess) {
+            cudaFree(d_branchAllelesFlat);
+            cudaFree(d_distances);
+            throw std::runtime_error(std::string("CUDA malloc failed for leaf: ") + cudaGetErrorString(err_leaf));
         }
         std::cout << " OK\n";
 
@@ -391,14 +389,10 @@ void processByLine(
         //checkAlphabet(letters, alphabet);
         std::vector<uint8_t> leafGenotype = encodeString(letters);
 
-        // Store leaf genotype in persistent GPU memory immediately
+        // Copy to GPU using cudaMemcpy (faster than manual loop)
         if(useGPU) {
-            //std::cout << "  Storing leaf " << sequenceCount << " in GPU memory..." << std::flush;
-            uint8_t* dest = d_leafGenotypesFlat + (sequenceCount * L);
-            for(size_t j = 0; j < L; j++) {
-                dest[j] = leafGenotype[j];
-            }
-            //std::cout << " OK\n" << std::flush;
+            cudaMemcpy(d_leafGenotype, leafGenotype.data(), 
+                    L * sizeof(uint8_t), cudaMemcpyHostToDevice);
         }
 
         InitNode* node = new InitNode;
@@ -458,7 +452,6 @@ void processByLine(
             // ============ GPU PATH ============
             
             //std::cout << "  Calling GPU kernel (numBranches=" << numBranches << ")..." << std::flush;
-            uint8_t* d_leafGenotype = d_leafGenotypesFlat + (sequenceCount * L);
             computeDistancesGPU(d_leafGenotype, d_branchAllelesFlat, d_distances, numBranches, L);
             //std::cout << " OK\n" << std::flush;
 
@@ -550,7 +543,7 @@ void processByLine(
     // Free GPU memory once at the end
     if(useGPU) {
         cudaFree(d_branchAllelesFlat);
-        cudaFree(d_leafGenotypesFlat);
+        cudaFree(d_leafGenotype);  // CHANGED: single buffer
         cudaFree(d_distances);
     }
 
