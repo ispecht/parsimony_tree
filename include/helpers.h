@@ -24,3 +24,8 @@ bool isMutation(uint8_t allele);
 bool isMissing(uint8_t allele);
 
 std::vector<uint8_t> encodeString(std::string seq);
+
+
+double dPois(int x, double lambda, bool log);
+
+double rUnif(double a, double b, std::mt19937& rng);

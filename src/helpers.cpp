@@ -81,3 +81,58 @@ std::vector<uint8_t> encodeString(std::string seq) {
 
     return out;
 }
+
+
+double dPois(int x, double lambda, bool log) {
+    // Input validation
+    if (x < 0) {
+        throw std::invalid_argument("x must be non-negative");
+    }
+
+    if(lambda == 0 && x == 0){
+        if(log){
+            return 0.0;
+        }else{
+            return 1.0;
+        }
+    }
+
+
+
+    if (lambda <= 0) {
+        throw std::invalid_argument("lambda must be positive");
+    }
+    
+    // For x = 0, the formula simplifies to e^(-λ)
+    if (x == 0) {
+        if(log) {
+            return (-lambda);
+        }else{
+            return std::exp(-lambda);
+        }
+    }
+    
+    // Use logarithms to avoid overflow for large values
+    // log(P(X = x)) = x * log(λ) - λ - log(x!)
+    // We compute log(x!) using lgamma(x + 1)
+    double log_pmf = x * std::log(lambda) - lambda - std::lgamma(x + 1);
+
+    if(log) {
+        return log_pmf;
+    }else{
+        return std::exp(log_pmf);
+    }
+}
+
+
+
+double rUnif(double a, double b, std::mt19937& rng) {
+    // Input validation
+    if (a > b) {
+        throw std::invalid_argument("Parameter 'a' must be less than 'b'");
+    }
+
+    // Set up random number generation
+    std::uniform_real_distribution<double> dist(a, b);
+    return dist(rng);
+}

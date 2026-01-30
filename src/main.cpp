@@ -232,6 +232,106 @@ void attach(
 
 }
 
+double get_max_t(InitNode* node) {
+    if(node->childBranches.size() == 0) {
+        throw std::runtime_error("Shouldn't call get_max_t on node with no children");
+    }
+
+    double t = std::numeric_limits<double>::infinity();
+    for(InitBranch* b : node->childBranches) {
+        t = std::min(b->child->t, t);
+    }
+
+    return t;
+}
+
+// MCMC Functions
+void initializeTimes(InitNode* node) {
+
+    if(node->childBranches.size() == 0) {
+        return;
+    }
+
+    for(InitBranch* b : node->childBranches) {
+        initializeTimes(b->child);
+    }
+
+    // Ensure we're not at the root
+    if(node->parentBranch != nullptr) {
+        // Set the time
+        node->t = get_max_t(node);
+    }
+}
+
+double branch_log_likelihood(InitBranch* branch, double mu) {
+    double delta_t = branch->child->t - branch->parent->t;
+
+    if(delta_t < 0.0) {
+        throw std::runtime_error("negative branch length");
+    }
+
+    // If a site is mutated, it contributes a factor of (mu*delta_t/3) exp(-mu * delta_t)
+    // If a site is not mutated, it contributes a factor of exp(-mu * delta_t)
+    // So the whole likelihood is (mu*delta_t/3)^n_mut * exp(-mu * delta_t * L)
+    // So the log likelihood is n_mut * log(mu * delta_t/3) - mu*delta_t*L
+    if(delta_t == 0.0) {
+        if(branch->nMuts == 0) {
+            return 0.0;
+        }else{
+            return -std::numeric_limits<double>::infinity();
+        }
+    }
+
+    return (branch->nMuts * std::log(mu * delta_t / 3.0)) - (mu * delta_t * branch->alleles.size());
+}
+
+double node_log_likelihood(InitNode* node, double mu) {
+    double log_lik = 0.0;
+    for(InitBranch* b : node->childBranches) {
+        log_lik += branch_log_likelihood(b);
+    }
+    log_lik += branch_log_likelihood(node->parentBranch);
+    return log_lik;
+} 
+
+void updateNodeTime(InitNode* node, double mu, std::mt19937& rng) {
+
+    // If no parent / no children, just do nothing
+    if(node->parent == nullptr) {
+        return;
+    }
+    if(node->childBranches.size() == 0) {
+        return;
+    }
+
+    double min_t = node->parent->t;
+    double max_t = get_max_t(node);
+
+    if(min_t > max_t) {
+        throw std::runtime_error("min_t, max_t out of order");
+    }
+
+    if(min_t == max_t) {
+        return;
+    }
+
+    double old_t = node->t;
+    double old_log_likelihood = node_log_likelihood(node);
+
+    node->t = rUnif(min_t, max_t, rng);
+
+    double new_log_likelihood = node_log_likelihood(node);
+
+    // Accept or reject
+    double u = rUnif(0.0, 1.0, rng);
+    double log_p_accept = new_log_likelihood - old_log_likelihood;
+
+    if(std::log(u) > log_p_accept) {
+        // Revert
+        node->t = old_t;
+    }
+}
+
 
 
 
@@ -246,13 +346,15 @@ void deleteInitTree(InitNode* node) {
 void processByLine(
     const std::string& fasta_filepath,
     const std::string& ref_filepath,
+    double ref_time,
     const std::string& metadata_filepath,
     int start_pos,
     int end_pos,
     int maxSequences,
     int maxBranches,
     bool ALLOW_MULTIFURCATIONS,
-    bool useGPU
+    bool useGPU,
+    int SEED
 ) {
     // Genome length
     size_t L = end_pos - start_pos;
@@ -305,6 +407,9 @@ void processByLine(
 
     // Parse metadata
     std::unordered_map<std::string, double> name_to_date = parseMetadata(metadata_filepath);
+
+    // Account for ref
+    name_to_date[refName] = ref_time;
 
     // PHASE 1: Collect sequence metadata without loading sequences
     std::cout << "Phase 1: Scanning FASTA for sequence metadata..." << std::endl;
@@ -422,6 +527,7 @@ void processByLine(
     rootNode->name = "";
     rootNode->parentBranch = nullptr;
     rootNode->childBranches = {};
+    rootNode->t = ref_time;
 
     // Valid tokens
     std::unordered_set<char> alphabet = {'A', 'C', 'G', 'T'};
@@ -490,6 +596,7 @@ void processByLine(
         node->name = meta.name;
         node->childBranches = {};
         node->seq = letters;
+        node->t = name_to_date[node->name];
 
         // FIRST BRANCH - special case
         if(allBranches.size() == 0) {
@@ -647,13 +754,25 @@ void processByLine(
         }
     }
 
+
+
+    std::cout << "MCMC part!" << std::endl;
+
+    // Random number generation
+    std::random_device rd;
+    std::mt19937 rng(SEED);
+
+    // Initialize all node times
+    initializeTimes(rootNode);
+
     // Cleanup tree
     deleteInitTree(rootNode);
+
 }
 
 int main(int argc, char* argv[]) {
-    if(argc != 10) {
-        std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <metadata_file> <start_pos> <end_pos> <max_sequences> <max_branches> <allow_multifurcations> <use_gpu>\n";
+    if(argc != 12) {
+        std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <ref_time> <metadata_file> <start_pos> <end_pos> <max_sequences> <max_branches> <allow_multifurcations> <use_gpu>\n";
         std::cerr << "  use_gpu: 0 for CPU, 1 for GPU\n";
         std::cerr << "Example: " << argv[0] << " data.fasta ref.fasta 0 30000 1000 10000 1 1\n";
         return 1;
@@ -661,18 +780,20 @@ int main(int argc, char* argv[]) {
 
     std::string fasta_filepath = argv[1];
     std::string ref_filepath = argv[2];
-    std::string metadata_filepath = argv[3];
-    int start_pos = std::stoi(argv[4]);
-    int end_pos = std::stoi(argv[5]);
-    int maxSequences = std::stoi(argv[6]);
-    int maxBranches = std::stoi(argv[7]);
-    bool ALLOW_MULTIFURCATIONS = (std::stoi(argv[8]) != 0);
-    bool useGPU = (std::stoi(argv[9]) != 0);
+    double ref_time = std::stod(argv[3]);
+    std::string metadata_filepath = argv[4];
+    int start_pos = std::stoi(argv[5]);
+    int end_pos = std::stoi(argv[6]);
+    int maxSequences = std::stoi(argv[7]);
+    int maxBranches = std::stoi(argv[8]);
+    bool ALLOW_MULTIFURCATIONS = (std::stoi(argv[9]) != 0);
+    bool useGPU = (std::stoi(argv[10]) != 0);
+    int SEED = std::stoi(argv[11]);
 
     std::cout << "Running in " << (useGPU ? "GPU" : "CPU") << " mode\n";
 
     try {
-        processByLine(fasta_filepath, ref_filepath, metadata_filepath, start_pos, end_pos, maxSequences, maxBranches, ALLOW_MULTIFURCATIONS, useGPU);
+        processByLine(fasta_filepath, ref_filepath, ref_time, metadata_filepath, start_pos, end_pos, maxSequences, maxBranches, ALLOW_MULTIFURCATIONS, useGPU, SEED);
     } catch(const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;

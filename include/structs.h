@@ -9,6 +9,7 @@ struct InitNode {
     std::vector<InitBranch*> childBranches;
     InitBranch* parentBranch;
     std::string name;
+    double t;
     std::string seq = "";
 };
 
