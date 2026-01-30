@@ -75,7 +75,7 @@ bool isMissing(uint8_t allele) {
 std::vector<uint8_t> encodeString(std::string seq) {
     std::vector<uint8_t> out;
 
-    for(int pos = 0; pos < seq.size(); pos++) {
+    for(size_t pos = 0; pos < seq.size(); pos++) {
         out.push_back(encodeBase(seq[pos]));
     }
 

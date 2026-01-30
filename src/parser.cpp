@@ -35,33 +35,29 @@ double date_to_decimal_year(int y, int m, int d)
 }
 
 std::unordered_map<std::string, double> parseMetadata(const std::string& metadata_filepath) {
-    std::cout << "Reading entire metadata file into memory..." << std::flush;
+    std::cout << "Streaming metadata file..." << std::flush;
     std::ifstream metadata_file(metadata_filepath);
-    std::stringstream buffer;
-    buffer << metadata_file.rdbuf();
-    std::string metadata_content = buffer.str();
-    metadata_file.close();
-    std::cout << " OK (" << metadata_content.size() / 1e6 << " MB)\n";
+    if (!metadata_file.is_open()) {
+        throw std::runtime_error("Failed to open metadata file");
+    }
+    std::cout << " OK\n";
 
     std::unordered_map<std::string, double> out;
     out.reserve(100000);  // Pre-allocate to avoid rehashing
-
-    const char* data = metadata_content.c_str();
-    const char* end = data + metadata_content.size();
-    const char* ptr = data;
 
     size_t lines_processed = 0;
     size_t entries_parsed = 0;
 
     std::cout << "Parsing metadata entries...\n";
 
-    while (ptr < end) {
-        // Find start of line
-        const char* line_start = ptr;
+    std::string line;
+    while (std::getline(metadata_file, line)) {
+        lines_processed++;
         
-        // Find end of line
-        const char* line_end = (const char*)memchr(ptr, '\n', end - ptr);
-        if (!line_end) line_end = end;
+        if (line.empty()) continue;
+
+        const char* data = line.c_str();
+        const char* end = data + line.size();
         
         const char* accession_start = nullptr;
         const char* accession_end = nullptr;
@@ -69,24 +65,24 @@ std::unordered_map<std::string, double> parseMetadata(const std::string& metadat
         const char* date_end = nullptr;
 
         // Search for "accession":"
-        const char* search_ptr = line_start;
-        while (search_ptr < line_end - 13) {
+        const char* search_ptr = data;
+        while (search_ptr < end - 13) {
             if (memcmp(search_ptr, "\"accession\":\"", 13) == 0) {
                 accession_start = search_ptr + 13;
                 // Find closing quote
-                accession_end = (const char*)memchr(accession_start, '\"', line_end - accession_start);
+                accession_end = (const char*)memchr(accession_start, '\"', end - accession_start);
                 break;
             }
             search_ptr++;
         }
 
         // Search for "collectionDate":"
-        search_ptr = line_start;
-        while (search_ptr < line_end - 18) {
+        search_ptr = data;
+        while (search_ptr < end - 18) {
             if (memcmp(search_ptr, "\"collectionDate\":\"", 18) == 0) {
                 date_start = search_ptr + 18;
                 // Find closing quote
-                date_end = (const char*)memchr(date_start, '\"', line_end - date_start);
+                date_end = (const char*)memchr(date_start, '\"', end - date_start);
                 break;
             }
             search_ptr++;
@@ -134,18 +130,15 @@ std::unordered_map<std::string, double> parseMetadata(const std::string& metadat
                 
                 entries_parsed++;
                 
-                // Log every 10000 entries
-                if (entries_parsed % 10000 == 0) {
-                    std::cout << "  Parsed " << entries_parsed << " entries...\n" << std::flush;
+                // Log every 100000 entries
+                if (entries_parsed % 100000 == 0) {
+                    std::cout << "  Parsed " << entries_parsed << " metadata entries...\n" << std::flush;
                 }
             }
         }
-
-        lines_processed++;
-        
-        // Move to next line
-        ptr = line_end + 1;
     }
+    
+    metadata_file.close();
 
     std::cout << "Parsed " << out.size() << " metadata entries from " 
               << lines_processed << " lines\n";

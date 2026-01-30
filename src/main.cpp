@@ -106,7 +106,8 @@ void attach(
     InitNode* node,
     const std::vector<uint8_t>& leafGenotype,
     InitBranch* branch,
-    std::vector<InitBranch*>& allBranches
+    std::vector<InitBranch*>& allBranches,
+    bool ALLOW_MULTIFURCATIONS
 ) {
 
     size_t L = leafGenotype.size();
@@ -197,27 +198,31 @@ void attach(
     // Wire node to newBranch
     node->parentBranch = newBranch;
 
-    // If the following hold:
-    // (1) all attachment points are left
-    // (2) left node isn't a leaf
-    // then attach directly to left node
-    if((nLeft == 0) && (branch->child->name == "")) {
-        newBranch->parent = branch->child; // Left endpoint of existing branch
-        newBranch->parent->childBranches.push_back(newBranch);
-        return;
-    }
-
-    // Same for right
-    if(nLeft == nMutsOnBranch) {
-        if(branch->parent->name != "") {
-            std::cout << branch->parent->name << std::endl;
-            throw std::runtime_error("Node with children shouldn't be named");
+    if(ALLOW_MULTIFURCATIONS) {
+        // If the following hold:
+        // (1) all attachment points are left
+        // (2) left node isn't a leaf
+        // then attach directly to left node
+        if((nLeft == 0) && (branch->child->name == "")) {
+            newBranch->parent = branch->child; // Left endpoint of existing branch
+            newBranch->parent->childBranches.push_back(newBranch);
+            return;
         }
 
-        newBranch->parent = branch->parent;
-        newBranch->parent->childBranches.push_back(newBranch);
-        return;
+        // Same for right
+        if(nLeft == nMutsOnBranch) {
+            if(branch->parent->name != "") {
+                std::cout << branch->parent->name << std::endl;
+                throw std::runtime_error("Node with children shouldn't be named");
+            }
+
+            newBranch->parent = branch->parent;
+            newBranch->parent->childBranches.push_back(newBranch);
+            return;
+        }
     }
+
+    
 
     InitNode* newNode = splitBranch(branch, isLeft, allBranches);
 
@@ -244,7 +249,9 @@ void processByLine(
     const std::string& metadata_filepath,
     int start_pos,
     int end_pos,
+    int maxSequences,
     int maxBranches,
+    bool ALLOW_MULTIFURCATIONS,
     bool useGPU
 ) {
     // Genome length
@@ -300,7 +307,7 @@ void processByLine(
     std::unordered_map<std::string, double> name_to_date = parseMetadata(metadata_filepath);
 
     // PHASE 1: Collect sequence metadata without loading sequences
-    std::cout << "Phase 1: Scanning FASTA for sequence metadata..." << std::flush;
+    std::cout << "Phase 1: Scanning FASTA for sequence metadata..." << std::endl;
     std::vector<SequenceMetadata> sequence_metadata;
 
     std::ifstream fasta_scan(fasta_filepath);
@@ -310,6 +317,8 @@ void processByLine(
 
     std::string current_name;  // Only declare new variables here
     std::streampos name_position = 0;
+
+    size_t n_fasta_processed = 0;
 
     while (std::getline(fasta_scan, line)) {  // Use existing 'line' variable
         if(line.empty()) continue;
@@ -328,6 +337,12 @@ void processByLine(
                 meta.file_position = name_position;
                 meta.sequence_length = line.length();
                 sequence_metadata.push_back(meta);
+
+                n_fasta_processed++;
+
+                if(n_fasta_processed % 100000 == 0) {
+                    std::cout << "  Indexed " << n_fasta_processed << " sequences...\n" << std::flush;
+                }
             }
             current_name.clear();
         }
@@ -444,8 +459,13 @@ void processByLine(
         
         // Check branch limit
         if(allBranches.size() + 2 >= (size_t)maxBranches) {
-            std::cout << "Reached maximum number of branches (" << maxBranches 
-                    << "). Stopping early.\n";
+            std::cout << "Reached maximum number of branches (" << maxBranches << "). Stopping early.\n";
+            break;
+        }
+
+        // Check sequence count lmit
+        if(sequenceCount >= (size_t)maxSequences) {
+            std::cout << "Reached maximum number of sequences (" << maxSequences << "). Stopping early.\n";
             break;
         }
         
@@ -561,7 +581,7 @@ void processByLine(
 
         // Attach to tree
         auto attach_start = std::chrono::high_resolution_clock::now();
-        attach(node, leafGenotype, bestBranch, allBranches);
+        attach(node, leafGenotype, bestBranch, allBranches, ALLOW_MULTIFURCATIONS);
         auto attach_end = std::chrono::high_resolution_clock::now();
         total_attach_time += std::chrono::duration_cast<std::chrono::microseconds>(
             attach_end - attach_start).count();
@@ -632,10 +652,10 @@ void processByLine(
 }
 
 int main(int argc, char* argv[]) {
-    if(argc != 8) {
-        std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <metadata_file> <start_pos> <end_pos> <max_branches> <use_gpu>\n";
+    if(argc != 10) {
+        std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <metadata_file> <start_pos> <end_pos> <max_sequences> <max_branches> <allow_multifurcations> <use_gpu>\n";
         std::cerr << "  use_gpu: 0 for CPU, 1 for GPU\n";
-        std::cerr << "Example: " << argv[0] << " data.fasta ref.fasta 0 30000 10000 1\n";
+        std::cerr << "Example: " << argv[0] << " data.fasta ref.fasta 0 30000 1000 10000 1 1\n";
         return 1;
     }
 
@@ -644,13 +664,15 @@ int main(int argc, char* argv[]) {
     std::string metadata_filepath = argv[3];
     int start_pos = std::stoi(argv[4]);
     int end_pos = std::stoi(argv[5]);
-    int maxBranches = std::stoi(argv[6]);
-    bool useGPU = (std::stoi(argv[7]) != 0);
+    int maxSequences = std::stoi(argv[6]);
+    int maxBranches = std::stoi(argv[7]);
+    bool ALLOW_MULTIFURCATIONS = (std::stoi(argv[8]) != 0);
+    bool useGPU = (std::stoi(argv[9]) != 0);
 
     std::cout << "Running in " << (useGPU ? "GPU" : "CPU") << " mode\n";
 
     try {
-        processByLine(fasta_filepath, ref_filepath, metadata_filepath, start_pos, end_pos, maxBranches, useGPU);
+        processByLine(fasta_filepath, ref_filepath, metadata_filepath, start_pos, end_pos, maxSequences, maxBranches, ALLOW_MULTIFURCATIONS, useGPU);
     } catch(const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
