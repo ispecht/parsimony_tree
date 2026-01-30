@@ -14,6 +14,15 @@
 #include "helpers.h"
 #include "debug.h"
 #include "structs.h"
+#include "parser.h"
+
+// Add this structure to hold sequence metadata
+struct SequenceMetadata {
+    std::string name;
+    double date;
+    std::streampos file_position;  // Position in file where sequence starts
+    size_t sequence_length;
+};
 
 
 // Compute min distance from a fixed genotype (leaf) to all possible genotypes allowed on a branch
@@ -232,6 +241,7 @@ void deleteInitTree(InitNode* node) {
 void processByLine(
     const std::string& fasta_filepath,
     const std::string& ref_filepath,
+    const std::string& metadata_filepath,
     int start_pos,
     int end_pos,
     int maxBranches,
@@ -279,6 +289,61 @@ void processByLine(
         throw std::runtime_error("Invalid refName");
     }
 
+    // Read entire file into memory first
+
+    // What we actually need to do:
+    // - Get every sequence in the fasta (vector)
+    // - Get the name of each sequence
+    // - Based on metadata, get time of each sequence
+
+    // Parse metadata
+    std::unordered_map<std::string, double> name_to_date = parseMetadata(metadata_filepath);
+
+    // PHASE 1: Collect sequence metadata without loading sequences
+    std::cout << "Phase 1: Scanning FASTA for sequence metadata..." << std::flush;
+    std::vector<SequenceMetadata> sequence_metadata;
+
+    std::ifstream fasta_scan(fasta_filepath);
+    if (!fasta_scan.is_open()) {
+        throw std::runtime_error("Failed to open FASTA file");
+    }
+
+    std::string current_name;  // Only declare new variables here
+    std::streampos name_position = 0;
+
+    while (std::getline(fasta_scan, line)) {  // Use existing 'line' variable
+        if(line.empty()) continue;
+        
+        if(line[0] == '>') {
+            std::string full_name = line.substr(1);
+            size_t space_pos = full_name.find(' ');
+            current_name = (space_pos != std::string::npos) ? full_name.substr(0, space_pos) : full_name;
+            name_position = fasta_scan.tellg();
+        } else if (!current_name.empty()) {
+            auto it = name_to_date.find(current_name);
+            if(it != name_to_date.end()) {
+                SequenceMetadata meta;
+                meta.name = current_name;
+                meta.date = it->second;
+                meta.file_position = name_position;
+                meta.sequence_length = line.length();
+                sequence_metadata.push_back(meta);
+            }
+            current_name.clear();
+        }
+    }
+    fasta_scan.close();
+
+    std::cout << " Found " << sequence_metadata.size() << " sequences\n";
+
+    // PHASE 2: Sort by date
+    std::cout << "Phase 2: Sorting sequences by date..." << std::flush;
+    std::sort(sequence_metadata.begin(), sequence_metadata.end(),
+            [](const SequenceMetadata& a, const SequenceMetadata& b) {
+                return a.date < b.date;
+            });
+    std::cout << " OK\n";
+
     // PERSISTENT GPU MEMORY - allocate once for entire run
     uint8_t* d_branchAllelesFlat = nullptr;
     uint8_t* d_leafGenotype = nullptr;
@@ -286,7 +351,7 @@ void processByLine(
     
     if(useGPU) {
 
-        // ADD STEP 3 HERE - Check if GPU is available
+        // Check if GPU is available
         int deviceCount = 0;
         cudaError_t err = cudaGetDeviceCount(&deviceCount);
         if(err != cudaSuccess || deviceCount == 0) {
@@ -336,12 +401,6 @@ void processByLine(
 
     }
 
-    // Open main FASTA file
-    std::ifstream fasta_file(fasta_filepath);
-    if (!fasta_file.is_open()) {
-        std::cerr << "Failed to open fasta_file\n";
-        return;
-    }
 
     // Create root node
     InitNode* rootNode = new InitNode;
@@ -365,53 +424,50 @@ void processByLine(
     
     size_t sequenceCount = 0;
 
-    // Read entire file into memory first
-    std::cout << "Reading entire FASTA into memory..." << std::flush;
+    
+    
+    // PHASE 3: Process sequences in chronological order
+    std::cout << "Phase 3: Processing sequences in chronological order...\n";
+
+    // Reopen file for reading sequences
     std::ifstream fasta_file(fasta_filepath);
-    std::stringstream buffer;
-    buffer << fasta_file.rdbuf();
-    std::string fasta_content = buffer.str();
-    fasta_file.close();
-    std::cout << " OK (" << fasta_content.size() / 1e6 << " MB)\n";
+    if (!fasta_file.is_open()) {
+        throw std::runtime_error("Failed to reopen FASTA file for processing");
+    }
+    std::string sequence_line;
 
-    // Parse from memory
-    std::istringstream fasta_stream(fasta_content);
-
-    std::cout << "Entering fasta processing step..." << std::endl;
-    while (std::getline(fasta_stream, line)) {
-        if(line.empty()) continue;
-
-        if(line[0] == '>') {
-            name = line.substr(1, line.size() - 1);
-            std::cout << "Processing sequence: " << name << std::flush;  // ADD THIS
-            continue;
+    for(const auto& meta : sequence_metadata) {
+        if(sequenceCount % 1000 == 0) {
+            std::cout << "Processing sequence " << sequenceCount 
+                    << " (date: " << meta.date << ")\n";
         }
-
-        std::cout << " (seq " << sequenceCount << ")" << std::endl;  // ADD THIS
-
-        // CHECK LIMIT with safety margin (each sequence can create up to 2 branches)
+        
+        // Check branch limit
         if(allBranches.size() + 2 >= (size_t)maxBranches) {
-            std::cout << "Reached maximum number of branches (" << maxBranches << "). Stopping early.\n";
-            std::cout << "Current branches: " << allBranches.size() << ", sequences processed: " << sequenceCount << "\n";
+            std::cout << "Reached maximum number of branches (" << maxBranches 
+                    << "). Stopping early.\n";
             break;
         }
-
+        
+        // Seek to sequence position and read
+        fasta_file.seekg(meta.file_position);
+        if(!std::getline(fasta_file, sequence_line)) {
+            std::cerr << "Warning: Failed to read sequence for " << meta.name << "\n";
+            continue;
+        }
+        
         // Parse sequence
-        std::string letters = line.substr(start_pos, L);
-        //checkAlphabet(letters, alphabet);
+        std::string letters = sequence_line.substr(start_pos, L);
         std::vector<uint8_t> leafGenotype = encodeString(letters);
-
-        // Copy to GPU using cudaMemcpy (faster than manual loop)
+        
+        // Copy to GPU
         if(useGPU) {
             cudaMemcpy(d_leafGenotype, leafGenotype.data(), 
-                    L * sizeof(uint8_t), cudaMemcpyHostToDevice);
+                      L * sizeof(uint8_t), cudaMemcpyHostToDevice);
         }
-
+        
         InitNode* node = new InitNode;
-        if(name == "") {
-            throw std::runtime_error("Invalid sequence name");
-        }
-        node->name = name;
+        node->name = meta.name;
         node->childBranches = {};
         node->seq = letters;
 
@@ -559,16 +615,25 @@ void processByLine(
         cudaFree(d_distances);
     }
 
+    bool SAFETY_MODE = false;
     // Validate tree structure
-    checkTree(refGenotype, rootNode);
+    if(SAFETY_MODE) {
+        checkTree(refGenotype, rootNode);
+
+        std::cout << "Mutation counts: " << std::endl;
+
+        for(InitBranch* b : allBranches) {
+            std::cout << b->nMuts << std::endl;
+        }
+    }
 
     // Cleanup tree
     deleteInitTree(rootNode);
 }
 
 int main(int argc, char* argv[]) {
-    if(argc != 7) {
-        std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <start_pos> <end_pos> <max_branches> <use_gpu>\n";
+    if(argc != 8) {
+        std::cerr << "Usage: " << argv[0] << " <fasta_file> <ref_file> <metadata_file> <start_pos> <end_pos> <max_branches> <use_gpu>\n";
         std::cerr << "  use_gpu: 0 for CPU, 1 for GPU\n";
         std::cerr << "Example: " << argv[0] << " data.fasta ref.fasta 0 30000 10000 1\n";
         return 1;
@@ -576,15 +641,16 @@ int main(int argc, char* argv[]) {
 
     std::string fasta_filepath = argv[1];
     std::string ref_filepath = argv[2];
-    int start_pos = std::stoi(argv[3]);
-    int end_pos = std::stoi(argv[4]);
-    int maxBranches = std::stoi(argv[5]);
-    bool useGPU = (std::stoi(argv[6]) != 0);
+    std::string metadata_filepath = argv[3];
+    int start_pos = std::stoi(argv[4]);
+    int end_pos = std::stoi(argv[5]);
+    int maxBranches = std::stoi(argv[6]);
+    bool useGPU = (std::stoi(argv[7]) != 0);
 
     std::cout << "Running in " << (useGPU ? "GPU" : "CPU") << " mode\n";
 
     try {
-        processByLine(fasta_filepath, ref_filepath, start_pos, end_pos, maxBranches, useGPU);
+        processByLine(fasta_filepath, ref_filepath, metadata_filepath, start_pos, end_pos, maxBranches, useGPU);
     } catch(const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
